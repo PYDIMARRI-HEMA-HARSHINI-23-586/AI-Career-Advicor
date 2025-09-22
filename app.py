@@ -4,24 +4,18 @@ import os
 import google.generativeai as genai
 import json
 import re
-import networkx as nx
-import plotly.graph_objects as go
+import pandas as pd
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Get your API key
 api_key = os.getenv("GEMINI_API_KEY")
 if api_key is None:
     st.error("GEMINI_API_KEY not set. Please add your API key to the .env file.")
     st.stop()
 
-# Configure Gemini API key
 genai.configure(api_key=api_key)
-
-# Page configuration
 st.set_page_config(page_title="Skill2Success", layout="centered")
-
 
 def landing_page():
     st.markdown(
@@ -47,7 +41,6 @@ def landing_page():
     if st.button("🎯 Create My Success Roadmap", help="Start your personalized journey"):
         st.session_state['page'] = 'quiz_page'
 
-
 def psychometric_test_page():
     st.title("Psychometric Test")
     st.write("Please answer the following questions to help us understand your personality and mindset.")
@@ -63,7 +56,6 @@ def psychometric_test_page():
     if st.button("Next: Skillset Quiz"):
         st.session_state['psychometric_answers'] = answers
         st.session_state['page'] = 'skillset_quiz_page'
-
 
 def skillset_quiz_page():
     st.title("Skillset Quiz")
@@ -87,21 +79,8 @@ def skillset_quiz_page():
             st.session_state['selected_skills'] = all_skills
             st.session_state['page'] = 'career_map_page'
 
-
-def flatten_skills(skill_list):
-    """Ensure skills are always strings, not dicts."""
-    flat = []
-    for s in skill_list:
-        if isinstance(s, dict):
-            flat.append(s.get('name') or s.get('skill') or json.dumps(s))
-        else:
-            flat.append(str(s))
-    return flat
-
-
 def career_map_page():
     st.title("Your Personalized Career Roadmap")
-
     psychometric_answers = st.session_state.get('psychometric_answers', {})
     selected_skills = st.session_state.get('selected_skills', [])
     if not selected_skills:
@@ -112,13 +91,11 @@ def career_map_page():
     I have a student with the following profile:
     Psychometric answers: {psychometric_answers}
     Skills: {selected_skills}
-
     Generate a personalized career roadmap including:
     1. Recommended career paths
-    2. Skills to learn (with priority)
+    2. Skills to learn (with priority and reason)
     3. Suggested micro-projects
     4. Tips for internships or hands-on experience
-
     Output ONLY the response in JSON format.
     """
 
@@ -131,73 +108,92 @@ def career_map_page():
     st.subheader("Raw AI response (for debugging):")
     st.text(response_text)
 
-    # Remove markdown JSON fences robustly
     response_text = response_text.strip()
+    # Remove markdown code fences robustly
     response_text = re.sub(r"^```(?:json)?", "", response_text, flags=re.IGNORECASE)
     response_text = re.sub(r"```$", "", response_text)
-
+    # Check for empty response
+    if not response_text or response_text.lower() in ["none", "null", "undefined"]:
+        st.error("AI did not return a valid response. Please try again or check your API key.")
+        st.stop()
     try:
         career_data = json.loads(response_text)
     except Exception as e:
-        st.error(f"Failed to parse AI response: {e}")
+        st.error(f"Failed to parse AI response: {e}\nRaw response: {response_text}")
         st.stop()
 
-    roadmap = career_data.get('careerRoadmap') or career_data.get('roadmap') or {}
-    careers = roadmap.get('recommendedCareerPaths') or roadmap.get('recommended_career_paths') or []
-    skills_to_learn = roadmap.get('skillsToLearn') or roadmap.get('skills_to_learn') or {}
-    high_priority = flatten_skills(skills_to_learn.get('highPriority') or skills_to_learn.get('high_priority') or [])
-    medium_priority = flatten_skills(skills_to_learn.get('mediumPriority') or skills_to_learn.get('medium_priority') or [])
-    low_priority = flatten_skills(skills_to_learn.get('lowPriority') or skills_to_learn.get('low_priority') or [])
-    selected_skills = flatten_skills(selected_skills)
+    roadmap = career_data.get('careerRoadmap') or {}
 
-    all_skills = list(set(high_priority + medium_priority + low_priority + selected_skills))
+    # Psychometric answers
+    st.subheader("Psychometric Answers")
+    for q, a in career_data.get('studentProfile', {}).get('psychometricAnswers', {}).items():
+        st.write(f"- **{q}:** {a}")
 
-    G = nx.DiGraph()
-    for skill in all_skills:
-        G.add_node(skill, type='skill')
-    for career in careers:
-        title = career.get('title') if isinstance(career, dict) else str(career)
-        G.add_node(title, type='career')
-        for skill in all_skills:
-            G.add_edge(skill, title)
+    # Skills to Learn table
+    st.subheader("Skills to Learn")
+    skills_to_learn = roadmap.get('skillsToLearn') or {}
+    if isinstance(skills_to_learn, dict):
+        skills = []
+        for priority in ["highPriority", "mediumPriority", "lowPriority"]:
+            for skill_item in skills_to_learn.get(priority) or []:
+                if isinstance(skill_item, dict):
+                    skills.append({
+                        "Skill": skill_item.get("skill", ""),
+                        "Priority": priority.capitalize(),
+                        "Reason": skill_item.get("reason", "")
+                    })
+        df = pd.DataFrame(skills)
+        st.table(df)
+    elif isinstance(skills_to_learn, list):
+        def flatten_skills_for_display(skill_list):
+            flat = []
+            for s in skill_list:
+                if isinstance(s, dict):
+                    flat.append(s.get('skill') or s.get('name') or str(s))
+                else:
+                    flat.append(str(s))
+            return flat
+        st.write(", ".join(flatten_skills_for_display(skills_to_learn)))
+    else:
+        st.write("No skills to learn data available.")
 
-    pos = nx.spring_layout(G, seed=42)
-    edge_x, edge_y = [], []
-    for edge in G.edges():
-        x0, y0 = pos[edge[0]]
-        x1, y1 = pos[edge[1]]
-        edge_x.extend([x0, x1, None])
-        edge_y.extend([y0, y1, None])
+    # Recommended Career Paths
+    st.subheader("Recommended Career Paths")
+    rec_careers = roadmap.get('recommendedCareerPaths') or []
+    for career in rec_careers:
+        if isinstance(career, dict):
+            title = career.get("title") or career.get("path")
+            desc = career.get("description", "")
+        else:
+            title = str(career)
+            desc = ""
+        if title and str(title).lower() != "none":
+            st.markdown(f"### {title}\n{desc}")
 
-    edge_trace = go.Scatter(
-        x=edge_x, y=edge_y,
-        line=dict(width=1, color='gray'),
-        mode='lines'
-    )
-    node_trace = go.Scatter(
-        x=[pos[n][0] for n in G.nodes()],
-        y=[pos[n][1] for n in G.nodes()],
-        mode='markers+text',
-        text=list(G.nodes()),
-        marker=dict(
-            size=15,
-            color=['blue' if G.nodes[n]['type'] == 'skill' else 'green' for n in G.nodes()]
-        )
-    )
-    fig = go.Figure(data=[edge_trace, node_trace])
-    fig.update_layout(
-        title='Skill → Career Map',
-        showlegend=False,
-        hovermode='closest',
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    # Suggested Micro-Projects
+    st.subheader("Suggested Micro-Projects")
+    projects = roadmap.get('suggestedMicroProjects') or []
+    for i, proj in enumerate(projects):
+        if isinstance(proj, dict):
+            title = proj.get("title") or proj.get("project")
+            desc = proj.get("description", "")
+        else:
+            title = str(proj)
+            desc = ""
+        if title and str(title).lower() != "none":
+            with st.expander(f"{i+1}. {title}"):
+                st.write(desc)
 
+    # Tips for Internships
+    st.subheader("Tips for Internships or Hands-On Experience")
+    tips = roadmap.get('tipsForInternshipsOrHandsOnExperience') or []
+    for i, tip in enumerate(tips):
+        st.write(f"{i+1}. {tip}")
 
 def main():
     if 'page' not in st.session_state:
         st.session_state['page'] = 'landing_page'
+
     if st.session_state['page'] == 'landing_page':
         landing_page()
     elif st.session_state['page'] == 'quiz_page':
@@ -206,7 +202,6 @@ def main():
         skillset_quiz_page()
     elif st.session_state['page'] == 'career_map_page':
         career_map_page()
-
 
 if __name__ == "__main__":
     main()
